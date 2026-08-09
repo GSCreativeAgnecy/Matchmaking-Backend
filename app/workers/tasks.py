@@ -117,3 +117,16 @@ async def cleanup_deleted_accounts(ctx: dict, *, older_than_days: int = 30) -> N
             user.password_hash = None
         await session.commit()
         logger.info("Anonymized %d deleted accounts", len(rows))
+
+
+async def process_notification_campaign(ctx: dict, campaign_id: str) -> dict:
+    """Fan out a campaign in batches. Idempotent — a rerun after completion is a no-op."""
+    from uuid import UUID
+
+    from app.services.notification_campaign_service import NotificationCampaignService
+
+    engine = ctx["engine"]
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    async with AsyncSession(engine) as session:
+        return await NotificationCampaignService(session).process(UUID(campaign_id))

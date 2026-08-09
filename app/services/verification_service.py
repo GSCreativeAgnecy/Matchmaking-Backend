@@ -10,6 +10,7 @@ from app.config.settings import settings
 from app.db.enums import EmploymentType, JobVerificationStatus, PaymentType
 from app.db.models import AppConfig, JobVerification, Payment, User
 from app.repositories.verification_repo import VerificationRepository
+from app.services.app_config_keys import PRICING_LOCAL_JOB_VERIFICATION, PRICING_NRI_JOB_VERIFICATION
 from app.services.audit_service import AuditService
 from app.services.payment_service import PaymentService
 
@@ -21,14 +22,25 @@ class VerificationService:
         self.audit = AuditService(session)
 
     async def _price_for(self, employment_type: EmploymentType) -> Decimal:
-        key = {
+        current_key = {
+            EmploymentType.LOCAL: PRICING_LOCAL_JOB_VERIFICATION,
+            EmploymentType.NRI: PRICING_NRI_JOB_VERIFICATION,
+        }[employment_type]
+        legacy_key = {
             EmploymentType.LOCAL: "LOCAL_JOB_VERIFICATION_PRICE",
             EmploymentType.NRI: "NRI_JOB_VERIFICATION_PRICE",
         }[employment_type]
-        row = await self.session.scalar(select(AppConfig).where(AppConfig.key == key))
-        if row and row.value and "amount" in row.value:
-            return Decimal(str(row.value["amount"]))
-        return Decimal(str(getattr(settings, key)))
+
+        row = await self.session.scalar(select(AppConfig).where(AppConfig.key == current_key))
+        if row and row.value is not None and isinstance(row.value, (int, float)):
+            return Decimal(str(row.value))
+
+        # Backward compatibility with legacy JSON-format pricing rows.
+        legacy = await self.session.scalar(select(AppConfig).where(AppConfig.key == legacy_key))
+        if legacy and legacy.value and "amount" in legacy.value:
+            return Decimal(str(legacy.value["amount"]))
+
+        return Decimal(str(getattr(settings, legacy_key)))
 
     async def submit(self, user: User, data: dict) -> dict:
         employment_type = EmploymentType(data["employment_type"])
@@ -103,6 +115,7 @@ class VerificationService:
         *,
         approve: bool,
         rejection_reason: str | None = None,
+        reviewer_notes: str | None = None,
         expires_in_days: int = 365,
     ) -> JobVerification:
         if reviewer.role not in {"VERIFIER", "ADMIN", "SUPER_ADMIN"}:
@@ -119,6 +132,7 @@ class VerificationService:
         else:
             verification.verification_status = JobVerificationStatus.REJECTED
             verification.rejection_reason = rejection_reason
+        verification.reviewer_notes = reviewer_notes
         verification.reviewer_id = reviewer.id
         await self.audit.record(
             action="verification.review",
@@ -126,6 +140,23 @@ class VerificationService:
             entity_type="job_verification",
             entity_id=str(verification.id),
             metadata={"approved": approve},
+        )
+        return verification
+
+    async def request_more_info(self, reviewer: User, verification_id: UUID, *, reason: str) -> JobVerification:
+        """Request additional documents. Keeps the record visible in the queue."""
+        verification = await self.session.get(JobVerification, verification_id)
+        if verification is None:
+            raise NotFoundError("Verification not found", code="VERIFICATION_NOT_FOUND")
+        if verification.verification_status == JobVerificationStatus.PENDING_PAYMENT:
+            raise ForbiddenError("Cannot request info before payment", code="VERIFICATION_NOT_PAID")
+        verification.reviewer_notes = reason
+        await self.audit.record(
+            action="job_verification.info_requested",
+            actor_user_id=reviewer.id,
+            entity_type="job_verification",
+            entity_id=str(verification.id),
+            metadata={"reason": reason},
         )
         return verification
 

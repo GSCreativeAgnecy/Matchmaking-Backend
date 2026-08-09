@@ -13,8 +13,25 @@ class UserRole(StrEnum):
     USER = "USER"
     MODERATOR = "MODERATOR"
     VERIFIER = "VERIFIER"
+    SUPPORT = "SUPPORT"
+    FINANCE = "FINANCE"
+    ANALYST = "ANALYST"
     ADMIN = "ADMIN"
     SUPER_ADMIN = "SUPER_ADMIN"
+
+
+# Roles that are allowed to sign in to the admin dashboard.
+ADMIN_ROLES = frozenset(
+    {
+        UserRole.MODERATOR,
+        UserRole.VERIFIER,
+        UserRole.SUPPORT,
+        UserRole.FINANCE,
+        UserRole.ANALYST,
+        UserRole.ADMIN,
+        UserRole.SUPER_ADMIN,
+    }
+)
 
 
 class Gender(StrEnum):
@@ -140,6 +157,7 @@ class ReportStatus(StrEnum):
     UNDER_REVIEW = "UNDER_REVIEW"
     RESOLVED = "RESOLVED"
     DISMISSED = "DISMISSED"
+    ESCALATED = "ESCALATED"
 
 
 class ReportReason(StrEnum):
@@ -278,3 +296,44 @@ class MessageVisibility(StrEnum):
     EVERYONE = "EVERYONE"
     MATCHES_ONLY = "MATCHES_ONLY"
     NOBODY = "NOBODY"
+
+
+class ConfigValueType(StrEnum):
+    STRING = "STRING"
+    INTEGER = "INTEGER"
+    FLOAT = "FLOAT"
+    BOOLEAN = "BOOLEAN"
+    JSON = "JSON"
+
+
+class ConfigCategory(StrEnum):
+    BRANDING = "BRANDING"
+    APP = "APP"
+    FEATURES = "FEATURES"
+    LIMITS = "LIMITS"
+    PRICING = "PRICING"
+    VERSIONS = "VERSIONS"
+    LEGAL = "LEGAL"
+    SUPPORT = "SUPPORT"
+
+
+class ProfileReviewStatus(StrEnum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    REQUEST_CHANGES = "REQUEST_CHANGES"
+    SUSPENDED = "SUSPENDED"
+
+
+class NotificationChannel(StrEnum):
+    PUSH = "PUSH"
+    EMAIL = "EMAIL"
+    SMS = "SMS"
+
+
+class NotificationCampaignStatus(StrEnum):
+    QUEUED = "QUEUED"
+    SENDING = "SENDING"
+    DONE = "DONE"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"

@@ -32,10 +32,18 @@ class User(Base, TimestampMixin, SoftDeleteMixin):
     is_banned: Mapped[bool] = mapped_column(default=False, nullable=False)
     banned_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
+    # Admin suspension ledger.
+    suspended_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    suspended_until: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    suspended_reason: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    suspended_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
     last_login_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     last_active_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True, index=True)
 
-    profile = relationship("Profile", back_populates="user", uselist=False, lazy="selectin")
+    profile = relationship(
+        "Profile", back_populates="user", uselist=False, lazy="selectin", foreign_keys="Profile.user_id"
+    )
 
     __table_args__ = (Index("ix_users_active", "account_status", "deleted_at"),)
 

@@ -16,6 +16,7 @@ from app.db.enums import (
     MaritalStatus,
     PhysicalStatus,
     ProfileCreatedBy,
+    ProfileReviewStatus,
     Smoking,
 )
 
@@ -81,7 +82,16 @@ class Profile(Base, TimestampMixin):
 
     profile_created_by: Mapped[ProfileCreatedBy] = enum_column(ProfileCreatedBy, default=ProfileCreatedBy.SELF)
 
-    user = relationship("User", back_populates="profile", uselist=False)
+    # Profile moderation (admin dashboard). Discovery integration is a documented
+    # follow-up; these fields are a moderation ledger, not an enforcement point yet.
+    review_status: Mapped[ProfileReviewStatus] = enum_column(
+        ProfileReviewStatus, default=ProfileReviewStatus.PENDING, index=True
+    )
+    reviewed_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    review_reason: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+
+    user = relationship("User", back_populates="profile", uselist=False, foreign_keys=[user_id])
 
     __table_args__ = (
         CheckConstraint("height_cm IS NULL OR (height_cm BETWEEN 90 AND 250)", name="height_range"),

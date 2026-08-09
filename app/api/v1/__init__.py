@@ -1,7 +1,20 @@
 from fastapi import APIRouter
 
 from app.api.v1 import (
-    admin,
+    admin_admin_users,
+    admin_analytics,
+    admin_app_config,
+    admin_audit,
+    admin_dashboard,
+    admin_matches,
+    admin_messages,
+    admin_moderation,
+    admin_notifications,
+    admin_payments,
+    admin_subscriptions,
+    admin_users,
+    admin_verification,
+    app,
     auth,
     blocks,
     family,
@@ -22,6 +35,7 @@ from app.api.v1 import (
 )
 
 api_router = APIRouter()
+api_router.include_router(app.router)
 api_router.include_router(auth.router)
 api_router.include_router(users.router)
 api_router.include_router(profiles.router)
@@ -39,4 +53,16 @@ api_router.include_router(subscriptions.router)
 api_router.include_router(payments.router)
 api_router.include_router(verification.router)
 api_router.include_router(shares.router)
-api_router.include_router(admin.router)
+api_router.include_router(admin_dashboard.router)
+api_router.include_router(admin_users.router)
+api_router.include_router(admin_moderation.router)
+api_router.include_router(admin_matches.router)
+api_router.include_router(admin_messages.router)
+api_router.include_router(admin_payments.router)
+api_router.include_router(admin_subscriptions.router)
+api_router.include_router(admin_verification.router)
+api_router.include_router(admin_notifications.router)
+api_router.include_router(admin_analytics.router)
+api_router.include_router(admin_audit.router)
+api_router.include_router(admin_admin_users.router)
+api_router.include_router(admin_app_config.router)

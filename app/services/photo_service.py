@@ -1,11 +1,14 @@
+import builtins
 import os
 from datetime import UTC
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.errors import NotFoundError
+from app.api.errors import NotFoundError, ValidationAppError
+from app.db.enums import PhotoVerificationStatus
 from app.db.models import Photo, User
 from app.repositories.base import BaseRepository
 from app.services.audit_service import AuditService
@@ -103,6 +106,83 @@ class PhotoService:
         photos = await self.repo.list_for_user(user_id)
         for p in photos:
             p.is_profile_photo = False
+
+    # ---------- admin moderation ----------
+
+    async def admin_list(
+        self,
+        *,
+        status: PhotoVerificationStatus | None = None,
+        user_id: UUID | None = None,
+        search: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[builtins.list[dict], int]:
+        from app.db.models import Profile
+
+        stmt = (
+            select(Photo, Profile.first_name, Profile.last_name, User.email)
+            .outerjoin(Profile, Profile.user_id == Photo.user_id)
+            .outerjoin(User, User.id == Photo.user_id)
+            .where(Photo.deleted_at.is_(None))
+        )
+        count_stmt = select(func.count()).select_from(Photo).where(Photo.deleted_at.is_(None))
+        if status is not None:
+            stmt = stmt.where(Photo.verification_status == status)
+            count_stmt = count_stmt.where(Photo.verification_status == status)
+        if user_id is not None:
+            stmt = stmt.where(Photo.user_id == user_id)
+            count_stmt = count_stmt.where(Photo.user_id == user_id)
+        if search:
+            like = f"%{search}%"
+            stmt = stmt.where(User.email.ilike(like))
+            count_stmt = count_stmt.where(User.email.ilike(like))
+        total = int((await self.session.execute(count_stmt)).scalar_one())
+        rows = (await self.session.execute(stmt.order_by(Photo.uploaded_at.desc()).limit(limit).offset(offset))).all()
+        return (
+            [
+                {
+                    "id": str(ph.id),
+                    "user_id": str(ph.user_id),
+                    "user_name": " ".join(n for n in (first, last) if n) or None,
+                    "url": ph.url,
+                    "thumbnail_url": ph.thumbnail_url,
+                    "verification_status": ph.verification_status.value,
+                    "mime_type": ph.mime_type,
+                    "is_profile_photo": ph.is_profile_photo,
+                    "uploaded_at": ph.uploaded_at,
+                    "created_at": ph.created_at,
+                }
+                for ph, first, last, _email in rows
+            ],
+            total,
+        )
+
+    async def review(
+        self,
+        admin: User,
+        photo_id: UUID,
+        *,
+        action: str,
+        reason: str | None = None,
+    ) -> Photo:
+        if action not in {"approve", "reject", "request_replacement"}:
+            raise ValidationAppError("action must be approve|reject|request_replacement", code="INVALID_ACTION")
+        photo = await self.session.scalar(select(Photo).where(Photo.id == photo_id, Photo.deleted_at.is_(None)))
+        if photo is None:
+            raise NotFoundError("Photo not found", code="PHOTO_NOT_FOUND")
+        if action == "approve":
+            photo.verification_status = PhotoVerificationStatus.VERIFIED
+        else:
+            photo.verification_status = PhotoVerificationStatus.REJECTED
+        await self.audit.record(
+            action=f"photo.{action}",
+            actor_user_id=admin.id,
+            entity_type="photo",
+            entity_id=str(photo.id),
+            metadata={"reason": reason},
+        )
+        return photo
 
     @staticmethod
     def _now():

@@ -58,6 +58,7 @@ def get_worker_settings() -> Settings:
             tasks.cleanup_deleted_accounts,
             tasks.process_photo_thumbnail,
             tasks.process_payment_webhook,
+            tasks.process_notification_campaign,
         ],
         redis_settings=build_redis_settings(),
         on_startup=[startup],

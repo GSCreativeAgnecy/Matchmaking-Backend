@@ -31,3 +31,7 @@ async def enqueue_sms(to: str, body: str) -> None:
 
 async def enqueue_push(user_id: str, title: str, body: str, data: dict[str, Any] | None = None) -> None:
     await enqueue_job("send_push_notification", user_id, title, body, data)
+
+
+async def enqueue_notification_campaign(campaign_id: str, defer_seconds: int | None = None) -> None:
+    await enqueue_job("process_notification_campaign", campaign_id, _defer_seconds=defer_seconds)

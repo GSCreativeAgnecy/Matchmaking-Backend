@@ -6,7 +6,9 @@ import jwt
 
 from app.config.settings import settings
 
-TokenType = Literal["access", "refresh"]
+TokenType = Literal["access", "refresh", "mfa"]
+
+MFA_TOKEN_EXPIRE_MINUTES = 5
 
 
 class TokenError(Exception):
@@ -35,6 +37,11 @@ def create_refresh_token(subject: str) -> tuple[str, str, datetime]:
     expires = timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
     expires_at = datetime.now(UTC) + expires
     return _create_token(subject, "refresh", expires=expires, jti=jti), jti, expires_at
+
+
+def create_mfa_token(subject: str) -> str:
+    """Short-lived token minted between password login and TOTP verification."""
+    return _create_token(subject, "mfa", expires=timedelta(minutes=MFA_TOKEN_EXPIRE_MINUTES))
 
 
 def decode_token(token: str, expected_type: TokenType) -> dict[str, Any]:

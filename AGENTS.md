@@ -31,22 +31,34 @@ app/
 │   ├── session.py           # engine + async_sessionmaker (build_engine), get_session
 │   └── models/              # one module per domain; __init__.py re-exports all
 ├── api/
-│   ├── deps.py              # get_session, get_current_user, require_role, rate_limit, get_storage
+│   ├── deps.py              # get_session, get_current_user, require_role, require_permission, rate_limit, get_storage
 │   ├── errors.py            # AppError hierarchy + error handlers + envelope helpers
-│   └── v1/                  # one router module per resource; __init__.py aggregates
+│   └── v1/                  # one router module per resource; __init__.py aggregates (admin_* = dashboard routers)
 ├── schemas/                 # Pydantic request/response models (one module per domain)
+│   ├── app_config.py        # admin + public grouped app-config schemas
+│   └── admin.py             # admin dashboard request/response schemas
 ├── repositories/            # data access; BaseRepository[T] + domain repos
+│   └── app_config_repo.py   # AppConfig queries (repo method is `list_configs`, not `list`)
 ├── services/                # business logic; service classes take AsyncSession
 │   ├── storage.py           # StorageBackend protocol + Local/S3 impls
 │   ├── astrology_provider.py# AstrologyProvider protocol + no-op impl
+│   ├── app_config_service.py# remote app configuration service (validation, cache, version)
+│   ├── app_config_keys.py   # central registry of known config keys + defaults
+│   ├── permission_service.py# Role -> Permission resolution (DB rows, static fallback)
+│   ├── totp_service.py      # TOTP 2FA (pyotp) + hashed recovery codes
+│   ├── admin_analytics_service.py  # dashboard/analytics aggregates (never raw scans)
+│   ├── admin_user_service.py       # admin user actions + sub-resource reads
+│   ├── notification_campaign_service.py  # campaign validation + batched fan-out
 │   └── ...
 ├── workers/                 # ARQ: arq_app.py (settings), tasks.py, enqueue.py
-├── security/                # jwt.py, password.py (argon2), redis.py, rate_limit.py
+├── security/                # jwt.py, password.py (argon2), redis.py, rate_limit.py, permissions.py (RBAC registry)
 ├── seed.py                  # idempotent seed script (python -m app.seed)
 ├── utils/                   # currently empty; add cross-cutting helpers here
+admin/                       # Admin web dashboard (Next.js, separate deployable app)
 migrations/                  # Alembic (async env.py), versions/
 tests/                       # pytest suite (SQLite in-memory, no Postgres/Redis)
 docs/architecture.md         # full design doc: ERD, enums, indexes, endpoints, designs
+docs/admin-dashboard.md      # admin dashboard architecture, setup, permissions, deployment
 ```
 
 ---
@@ -131,6 +143,7 @@ docker compose up --build
 | `SMTP_*`, `SMS_PROVIDER` | Email/SMS delivery |
 | `RATE_LIMIT_ENABLED`, `LOGIN_RATE_LIMIT`, `OTP_RATE_LIMIT` | Rate limiting (e.g. `10/15m`) |
 | `CORS_ORIGINS` | Allowed origins (JSON list) |
+| `APP_CONFIG_CACHE_TTL`, `APP_CONFIG_CACHE_KEY` | Public app-config Redis cache (TTL seconds, key name) |
 | `LOCAL_JOB_VERIFICATION_PRICE`, `NRI_JOB_VERIFICATION_PRICE` | Fallback verification pricing (DB `app_config` takes precedence) |
 
 ---
@@ -264,6 +277,9 @@ class MyRepository(BaseRepository[MyModel]):
 - **Refresh rotation:** every `/auth/refresh` revokes the presented token (`refresh_tokens.revoked_at`, `replaced_by_jti`) and issues a new pair. Reusing a rotated token must fail with `401 TOKEN_REVOKED`.
 - **Never trust the client** for: `user_id`, premium status, subscription status, payment status, verification status, admin role. All derived server-side.
 - **`get_current_user`** (`app/api/deps.py`) is the only way to resolve a user from a request; it rejects banned/deleted accounts.
+- **`require_role(*roles)`** gates admin/verifier endpoints and raises **`403 FORBIDDEN`** (a `ForbiddenError`) for insufficient roles. Tests for admin endpoints assert 403.
+- **`require_permission(*perms)` / `require_any_permission(*perms)`** gate admin-dashboard endpoints by **permission**, not role. Permissions resolve via `PermissionService.permissions_for_role` (DB `role_permissions` rows, falling back to the static `ROLE_PERMISSIONS` registry in `app/security/permissions.py`). Do not hand-roll permission checks in routers.
+- **2FA (TOTP):** opt-in per user (`user_totp_secrets` + hashed `totp_recovery_codes`). When enabled, `POST /auth/login` returns `{requires_2fa, mfa_token}` and `POST /auth/totp/verify` completes the login. Do not bypass this on admin logins.
 - **Ownership checks** live in services (photos, preferences, family, matches, conversations, shares). Example: `get_for_user(photo_id, user.id)`.
 - **Rate limiting** (`app/api/deps.py: rate_limit("login")`) is Redis-backed and **fail-open** — a Redis outage must never lock users out. Auth/OTP flows use it.
 - Redis token storage (OTP, reset, email-verify) also **fail-open** via `_redis_setex/_redis_get` in `auth_service.py`.
@@ -349,8 +365,34 @@ Candidate Generation -> Hard Filters -> Scoring -> Ranking -> Feed
   - resolve by `provider_payment_id` → fall back to internal payment UUID (mock/webhook-retry convenience);
   - already-terminal payments return `{"status": "duplicate"}`;
   - success → `payment.status = SUCCESS`, then downstream transition (subscription activation or job verification → `UNDER_REVIEW`) via `_mark_success`.
-- Job verification pricing is DB-driven from `app_config` (`LOCAL_JOB_VERIFICATION_PRICE=119`, `NRI_JOB_VERIFICATION_PRICE=199`) with `settings` fallback. Never hardcode pricing in logic.
+- Job verification pricing is DB-driven from `app_config` (`pricing.local_job_verification=119`, `pricing.nri_job_verification=199`, legacy keys + `settings` fallback). Never hardcode pricing in logic.
 - Status machine: `PENDING_PAYMENT -> UNDER_REVIEW -> VERIFIED | REJECTED | EXPIRED`.
+
+---
+
+## 15b. Remote app configuration
+
+- `app_config` is the backend-managed config source for the mobile app (branding, feature flags, public limits/pricing, app versions, maintenance state, legal/support). It is **not** a secret store.
+- Model (in `app/db/models/lookups.py`): `key` (unique), `value` (JSONB — scalars or structured JSON), `value_type` (`ConfigValueType`), `category` (`ConfigCategory`), `is_public`, `is_active`, `description`, `updated_by`.
+- **Known keys live in `app/services/app_config_keys.py`** (`CONFIG_KEY_SPECS`) — the single source for seeds and validation. Never hardcode config keys elsewhere.
+- Public endpoint `GET /api/v1/app/config` is **unauthenticated** and returns only `is_public && is_active` entries, grouped by category, with a content-derived `meta.version` (SHA-256 prefix). Stable field names + `extra="allow"` schemas keep old clients working.
+- Public grouping strips `enable_` prefixes (`features.enable_registration` → `features.registration`) via `app_config_keys.public_name_for()`.
+- Admin endpoints `/api/v1/admin/app-config` are `ADMIN`/`SUPER_ADMIN` only (`require_role`). `key` and `value_type` are immutable after creation; `DELETE` is a soft deactivation.
+- Validation (in `app_config_service.py`): key format, value↔value_type match, category membership, hex colors for `*_color` keys, duplicate key → `409 CONFIG_KEY_EXISTS`.
+- Redis cache key `app_config:public` (TTL `APP_CONFIG_CACHE_TTL`) with **fail-open** behavior; every mutation invalidates the cache and writes an audit event (`app_config.created/updated/deactivated`).
+- Pricing shown to clients is display-only; payment/verification services always read the authoritative server-side price and never trust a client amount.
+
+---
+
+## 15c. Admin dashboard, RBAC & 2FA
+
+- The admin dashboard is a **separate Next.js app** (`admin/`), a pure API client. It never connects to PostgreSQL, never holds secrets, and never enforces authorization itself (UI hiding is convenience only).
+- **RBAC:** roles are `SUPER_ADMIN, ADMIN, MODERATOR, VERIFIER, SUPPORT, FINANCE, ANALYST`. Permissions are strings (see `app/security/permissions.py` `ALL_PERMISSIONS`); defaults live in `ROLE_PERMISSIONS` and are seeded into `role_permissions`. All admin endpoints are gated with `require_permission`/`require_any_permission` — never hand-roll role checks. `SUPER_ADMIN` permissions are immutable.
+- **Admin API:** `/api/v1/admin/*` routers in `app/api/v1/admin_*.py` (dashboard, users, moderation, matches, messages, payments, subscriptions, verification, notifications, analytics, audit, admin-users). Routers commit; services hold rules; aggregates never scan raw tables.
+- **Audit everything sensitive:** suspension, ban, delete, moderation, verification, refunds, plan changes, app-config changes, role/permission changes, admin create/disable, private-message access (`admin.message_view`), notification campaigns. Pass `ip_address`/`user_agent` from `get_request_context(request)`.
+- **2FA:** `TotpService` (pyotp). `user_totp_secrets` stores the base32 secret; `totp_recovery_codes` stores SHA-256 hashes. Login is two-step when enabled (`/auth/totp/*`). Recovery codes are single-use.
+- **Notification campaigns:** `notification_campaigns` + `NotificationCampaignService`; `POST /admin/notifications/campaign` validates the audience (cap 100k) and enqueues `process_notification_campaign` on ARQ (batched fan-out, never synchronous from the request).
+- See `docs/admin-dashboard.md` for the full frontend architecture, routes, session handling (HttpOnly refresh cookie via Next.js BFF), and deployment.
 
 ---
 
@@ -367,7 +409,7 @@ Candidate Generation -> Hard Filters -> Scoring -> Ranking -> Feed
 
 - Entrypoint `app/workers/arq_app.WorkerSettings` (a `Settings` dataclass instance). Run: `arq app.workers.arq_app.WorkerSettings`.
 - Enqueue from app code with `app/workers/enqueue.py` helpers; they **fail-open** when the worker/Redis is down.
-- Jobs: `send_email`, `send_sms`, `send_push_notification`, `process_photo_thumbnail`, `process_payment_webhook`, `expire_subscriptions`, `expire_profile_shares`, `expire_job_verifications`, `cleanup_deleted_accounts`.
+- Jobs: `send_email`, `send_sms`, `send_push_notification`, `process_photo_thumbnail`, `process_payment_webhook`, `expire_subscriptions`, `expire_profile_shares`, `expire_job_verifications`, `cleanup_deleted_accounts`, `process_notification_campaign`.
 - Scheduling (e.g. daily expiry runs) is delegated to your orchestrator — tasks are functions to call, not cron.
 - ARQ was chosen over Celery because the stack is fully async; jobs reuse the same async app code without serialization bridges.
 
@@ -398,6 +440,12 @@ Candidate Generation -> Hard Filters -> Scoring -> Ranking -> Feed
 - Adding a scoring factor without a `WEIGHTS` key + `_REASON_MAP` entry → `KeyError`.
 - Enqueueing jobs inside the request hot path is fine (they fail-open), but never `await` worker results — fire-and-forget only.
 - `datetime.now(UTC)` vs SQLite naive values — normalize before comparing (see §6).
+- Naming a repo method `list` shadows the builtin for class-body annotations (`list[Model]` → "not subscriptable" / "not valid as a type"). `AppConfigRepository` uses `list_configs`.
+- Admin/verifier authorization must go through `require_role` (returns `403 FORBIDDEN`); don't hand-roll role checks or return 401.
+- A service attribute `self.audit = AuditService(...)` shadows any `audit()` method on the same service (`'AuditService' object is not callable`) — name the method differently (e.g. `audit_trail`).
+- Adding a second FK from a table to `users` makes `User.profile`/`Profile.user` ambiguous — declare `foreign_keys` on the relationship.
+- `require_permission` depends on the session too — the endpoint must still declare `Depends(get_session)` (the session is shared/cached per request, not duplicated).
+- Admin aggregates must use indexed/aggregate queries, never `SELECT *` + Python sums over the whole table (see `admin_analytics_service.py`).
 
 ---
 
@@ -409,9 +457,10 @@ Candidate Generation -> Hard Filters -> Scoring -> Ranking -> Feed
 4. **Repository** (only if non-trivial queries) extending `BaseRepository[T]`; export in `app/repositories/__init__.py`.
 5. **Service** holding all business rules + authorization; take `AsyncSession`.
 6. **Router** in `app/api/v1/`, using `Depends(get_current_user)`, `Depends(get_session)` (from `app.api.deps`), committing, returning `ApiResponse[...]`; register in `app/api/v1/__init__.py`.
-7. **Audit** sensitive actions via `AuditService.record`.
-8. **Tests** in `tests/`, covering rules + authorization + edge cases.
-9. Verify: `ruff check`, `ruff format`, `mypy app`, `pytest`, `alembic check` (Postgres).
+7. **Admin endpoints** use `require_permission(...)`/`require_any_permission(...)` (never `require_role` for new dashboard routes) and record `ip_address`/`user_agent` via `get_request_context(request)` on mutations.
+8. **Audit** sensitive actions via `AuditService.record`.
+9. **Tests** in `tests/`, covering rules + authorization + edge cases.
+10. Verify: `ruff check`, `ruff format`, `mypy app`, `pytest`, `alembic check` (Postgres).
 
 ---
 
@@ -427,6 +476,8 @@ Candidate Generation -> Hard Filters -> Scoring -> Ranking -> Feed
 | `<coroutine object ...> was never awaited` | An async repo/service method called without `await`. |
 | 401 on everything in tests | `get_session` imported from `app.db.session` (breaks the test override). |
 | `KeyError: '<factor>'` in scoring | A new scoring factor was added without a `WEIGHTS` key / `_REASON_MAP` entry. |
+| `list` is not valid as a type in a repo | A repo method named `list` shadows the builtin; rename it (e.g. `list_configs`). |
+| Admin endpoints return 401 for bad roles | Stale code path bypasses `require_role`; `require_role` must raise `ForbiddenError` → `403 FORBIDDEN`. |
 | `alembic check` reports UUID drift | Only on SQLite (CHAR(32) vs GUID rendering); false positive — run against Postgres. |
 
 ---

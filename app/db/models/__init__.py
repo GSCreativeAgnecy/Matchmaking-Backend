@@ -1,6 +1,7 @@
 """All models, imported so the metadata registry is fully populated."""
 
 from app.db.base import Base
+from app.db.models.admin import RecoveryCode, RolePermission, UserTotpSecret
 from app.db.models.astrology import AstrologyProfile
 from app.db.models.audit import AuditLog
 from app.db.models.billing import Payment, Subscription, SubscriptionPlan
@@ -21,7 +22,7 @@ from app.db.models.lookups import (
 from app.db.models.match import Match
 from app.db.models.message import Conversation, ConversationParticipant, Message
 from app.db.models.moderation import Block, Report
-from app.db.models.notification import Notification
+from app.db.models.notification import Notification, NotificationCampaign
 from app.db.models.photo import Photo
 from app.db.models.preference import (
     PartnerPreference,
@@ -60,6 +61,7 @@ __all__ = [
     "Match",
     "Message",
     "Notification",
+    "NotificationCampaign",
     "Occupation",
     "PartnerPreference",
     "Payment",
@@ -73,9 +75,11 @@ __all__ = [
     "PreferredState",
     "Profile",
     "ProfileShare",
+    "RecoveryCode",
     "RefreshTokenRecord",
     "Religion",
     "Report",
+    "RolePermission",
     "State",
     "Subscription",
     "SubscriptionPlan",
@@ -84,5 +88,6 @@ __all__ = [
     "UserInterest",
     "UserLanguage",
     "UserPrivacySettings",
+    "UserTotpSecret",
     "all_models",
 ]

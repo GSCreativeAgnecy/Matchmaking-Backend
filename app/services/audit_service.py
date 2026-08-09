@@ -23,6 +23,9 @@ SENSITIVE_EVENTS = frozenset(
         "subscription.change",
         "payment.event",
         "user.delete",
+        "app_config.created",
+        "app_config.updated",
+        "app_config.deactivated",
     }
 )
 

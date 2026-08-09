@@ -78,14 +78,45 @@ class AuthService:
         await self._send_verification(user)
         return user
 
-    async def login(self, *, email: str | None, phone_number: str | None, password: str) -> User:
+    async def login(self, *, email: str | None, phone_number: str | None, password: str) -> tuple[User, bool]:
+        """Validate credentials.
+
+        Returns ``(user, mfa_required)``. When ``mfa_required`` is true the caller
+        must complete two-factor authentication before any token is issued.
+        """
         user = await self.users.get_by_email_or_phone(email, phone_number)
         if not user or not user.password_hash or not verify_password(password, user.password_hash):
             raise UnauthorizedError("Invalid credentials", code="INVALID_CREDENTIALS")
         await self._assert_login_allowed(user)
+
+        from app.services.totp_service import TotpService
+
+        mfa_required = await TotpService(self.session).is_enabled(user.id)
         user.last_login_at = _now()
         await self.audit.record(action="auth.login", actor_user_id=user.id, entity_type="user", entity_id=user.id)
-        return user
+        return user, mfa_required
+
+    async def complete_mfa_login(self, mfa_token: str, code: str) -> dict:
+        """Verify a TOTP/recovery code after a password login and issue tokens."""
+        try:
+            payload = decode_token(mfa_token, "mfa")
+        except TokenError as exc:
+            raise UnauthorizedError(str(exc), code="INVALID_MFA_TOKEN") from exc
+
+        from app.services.totp_service import TotpService
+
+        user = await self.users.get(UUID(payload["sub"]))
+        if user is None:
+            raise UnauthorizedError("Account not found", code="NOT_AUTHENTICATED")
+        totp = TotpService(self.session)
+        if not await totp.is_enabled(user.id):
+            raise UnauthorizedError("Two-factor authentication is not enabled", code="MFA_NOT_ENABLED")
+        if not await totp.verify(user, code):
+            raise UnauthorizedError("Invalid verification code", code="INVALID_TOTP")
+        await self.audit.record(
+            action="auth.mfa_completed", actor_user_id=user.id, entity_type="user", entity_id=user.id
+        )
+        return await self.create_token_pair(user.id)
 
     async def _assert_login_allowed(self, user: User) -> None:
         if user.deleted_at is not None or user.account_status == AccountStatus.DELETED:

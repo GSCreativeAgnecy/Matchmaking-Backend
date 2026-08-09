@@ -7,16 +7,23 @@ from app.schemas.auth import (
     ForgotPasswordRequest,
     LoginRequest,
     LogoutRequest,
+    MfaRequiredResponse,
     RefreshRequest,
     RegisterRequest,
     ResetPasswordRequest,
     SendOtpRequest,
     TokenResponse,
+    TotpDisableRequest,
+    TotpEnableRequest,
+    TotpSetupResponse,
+    TotpStatusResponse,
+    TotpVerifyRequest,
     UserAccountResponse,
     VerifyOtpRequest,
 )
 from app.schemas.common import ApiResponse
 from app.services.auth_service import AuthService
+from app.services.totp_service import TotpService
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -39,18 +46,90 @@ async def register(
     return _token_data(tokens)
 
 
-@router.post("/login", summary="Log in", response_model=ApiResponse[TokenResponse])
+@router.post(
+    "/login",
+    summary="Log in",
+    response_model=ApiResponse[TokenResponse | MfaRequiredResponse],
+)
 async def login(
     payload: LoginRequest,
     request: Request,
     session: AsyncSession = Depends(get_session),
     _: None = Depends(rate_limit("login")),
-) -> ApiResponse[TokenResponse]:
+) -> ApiResponse[TokenResponse] | ApiResponse[MfaRequiredResponse]:
     service = AuthService(session)
-    user = await service.login(email=payload.email, phone_number=payload.phone_number, password=payload.password)
+    user, mfa_required = await service.login(
+        email=payload.email, phone_number=payload.phone_number, password=payload.password
+    )
+    if mfa_required:
+        from app.security.jwt import MFA_TOKEN_EXPIRE_MINUTES, create_mfa_token
+
+        mfa_token = create_mfa_token(str(user.id))
+        await session.commit()
+        return ApiResponse(data=MfaRequiredResponse(mfa_token=mfa_token, expires_in=MFA_TOKEN_EXPIRE_MINUTES * 60))
     tokens = await service.create_token_pair(user.id)
     await session.commit()
     return _token_data(tokens)
+
+
+@router.post(
+    "/totp/verify", summary="Complete login with a TOTP/recovery code", response_model=ApiResponse[TokenResponse]
+)
+async def totp_verify(
+    payload: TotpVerifyRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(rate_limit("otp")),
+) -> ApiResponse[TokenResponse]:
+    service = AuthService(session)
+    tokens = await service.complete_mfa_login(payload.mfa_token, payload.code)
+    await session.commit()
+    return _token_data(tokens)
+
+
+@router.post(
+    "/totp/setup", summary="Generate a TOTP secret + recovery codes", response_model=ApiResponse[TotpSetupResponse]
+)
+async def totp_setup(
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[TotpSetupResponse]:
+    data = await TotpService(session).setup(user)
+    await session.commit()
+    return ApiResponse(data=TotpSetupResponse(**data))
+
+
+@router.get(
+    "/totp/status", summary="Whether TOTP is enabled for the account", response_model=ApiResponse[TotpStatusResponse]
+)
+async def totp_status(
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[TotpStatusResponse]:
+    enabled = await TotpService(session).is_enabled(user.id)
+    return ApiResponse(data=TotpStatusResponse(enabled=enabled))
+
+
+@router.post("/totp/enable", summary="Enable TOTP after confirming a live code", response_model=ApiResponse[dict])
+async def totp_enable(
+    payload: TotpEnableRequest,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[dict]:
+    await TotpService(session).enable(user, payload.code)
+    await session.commit()
+    return ApiResponse(data={"status": "enabled"})
+
+
+@router.post("/totp/disable", summary="Disable TOTP (password required)", response_model=ApiResponse[dict])
+async def totp_disable(
+    payload: TotpDisableRequest,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[dict]:
+    await TotpService(session).disable(user, payload.password)
+    await session.commit()
+    return ApiResponse(data={"status": "disabled"})
 
 
 @router.post("/refresh", summary="Rotate the refresh token", response_model=ApiResponse[TokenResponse])

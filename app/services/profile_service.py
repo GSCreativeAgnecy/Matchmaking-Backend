@@ -1,8 +1,9 @@
 import math
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.errors import NotFoundError
@@ -155,3 +156,140 @@ class ProfileService:
             base["is_online"] = target.last_active_at and (now - target.last_active_at).total_seconds() < 120
 
         return PublicProfileResponse(**base)
+
+    # ---------- admin moderation ----------
+
+    async def admin_list(
+        self,
+        *,
+        search: str | None = None,
+        incomplete: bool | None = None,
+        reported: bool | None = None,
+        review_status: str | None = None,
+        recently_updated: bool | None = None,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        from sqlalchemy import exists, func, or_, select
+
+        from app.db.models import Photo, Report
+
+        reported_exists = exists().where(Report.reported_user_id == Profile.user_id)
+        stmt = select(Profile, User.email).join(User, User.id == Profile.user_id)
+        count_stmt = select(func.count()).select_from(Profile).join(User, User.id == Profile.user_id)
+        conds = []
+        if search:
+            like = f"%{search}%"
+            conds.append(
+                or_(
+                    Profile.first_name.ilike(like),
+                    Profile.last_name.ilike(like),
+                    User.email.ilike(like),
+                    User.phone_number.ilike(like),
+                )
+            )
+        if incomplete:
+            conds.append(Profile.first_name.is_(None))
+        if reported:
+            conds.append(reported_exists)
+        if review_status:
+            conds.append(Profile.review_status == review_status)
+        if recently_updated:
+            conds.append(Profile.updated_at > datetime.now(UTC) - timedelta(days=7))
+
+        for c in conds:
+            stmt = stmt.where(c)
+            count_stmt = count_stmt.where(c)
+
+        total = int((await self.session.execute(count_stmt)).scalar_one())
+        rows = (await self.session.execute(stmt.order_by(Profile.updated_at.desc()).limit(limit).offset(offset))).all()
+        user_ids = [p.user_id for p, _ in rows]
+        photo_map = {}
+        if user_ids:
+            photo_rows = (
+                await self.session.execute(
+                    select(Photo.user_id, Photo.url).where(
+                        Photo.user_id.in_(user_ids),
+                        Photo.deleted_at.is_(None),
+                        Photo.verification_status != "REJECTED",
+                    )
+                )
+            ).all()
+            photo_map = {uid: url for uid, url in photo_rows}
+        return (
+            [
+                {
+                    "user_id": str(p.user_id),
+                    "email": email,
+                    "name": " ".join(n for n in (p.first_name, p.last_name) if n) or None,
+                    "gender": p.gender.value if p.gender else None,
+                    "age": _age(p.date_of_birth),
+                    "city": p.city,
+                    "country": p.country,
+                    "religion": p.religion,
+                    "occupation": p.occupation,
+                    "review_status": p.review_status.value if p.review_status else None,
+                    "completeness": round(
+                        (sum(1 for f in self._required_fields() if getattr(p, f, None)) / len(self._required_fields()))
+                        * 100
+                    ),
+                    "profile_photo": photo_map.get(p.user_id),
+                    "updated_at": p.updated_at,
+                }
+                for p, email in rows
+            ],
+            total,
+        )
+
+    @staticmethod
+    def _required_fields() -> list[str]:
+        return [
+            "first_name",
+            "date_of_birth",
+            "gender",
+            "religion",
+            "caste",
+            "education",
+            "occupation",
+            "city",
+            "country",
+        ]
+
+    async def moderate(
+        self,
+        admin: User,
+        user_id: UUID,
+        *,
+        action: str,
+        reason: str | None = None,
+    ) -> Profile:
+        from datetime import UTC
+
+        from app.api.errors import ValidationAppError
+        from app.db.enums import ProfileReviewStatus
+
+        mapping = {
+            "approve": ProfileReviewStatus.APPROVED,
+            "reject": ProfileReviewStatus.REJECTED,
+            "request_changes": ProfileReviewStatus.REQUEST_CHANGES,
+            "suspend_profile": ProfileReviewStatus.SUSPENDED,
+        }
+        if action not in mapping:
+            raise ValidationAppError(
+                "action must be approve|reject|request_changes|suspend_profile", code="INVALID_ACTION"
+            )
+        profile = await self.session.scalar(select(Profile).where(Profile.user_id == user_id))
+        if profile is None:
+            raise NotFoundError("Profile not found", code="PROFILE_NOT_FOUND")
+        profile.review_status = mapping[action]
+        profile.reviewed_by = admin.id
+        profile.reviewed_at = datetime.now(UTC)
+        profile.review_reason = reason
+        await self.audit.record(
+            action="profile.moderate",
+            actor_user_id=admin.id,
+            entity_type="profile",
+            entity_id=str(profile.id),
+            metadata={"action": action, "reason": reason},
+        )
+        return profile

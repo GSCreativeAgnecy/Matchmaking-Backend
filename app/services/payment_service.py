@@ -32,6 +32,10 @@ class PaymentProvider(Protocol):
 
     async def verify_webhook(self, payload: dict[str, Any], headers: dict[str, str]) -> bool: ...
 
+    async def refund(self, provider_payment_id: str) -> bool:
+        """Best-effort refund. Returns False when the provider cannot refund."""
+        return False
+
 
 class MockPaymentProvider:
     """Development provider: fake checkout + accepts all webhooks."""
@@ -47,6 +51,9 @@ class MockPaymentProvider:
         }
 
     async def verify_webhook(self, payload: dict[str, Any], headers: dict[str, str]) -> bool:
+        return True
+
+    async def refund(self, provider_payment_id: str) -> bool:
         return True
 
 
@@ -99,6 +106,19 @@ class StripePaymentProvider:
             }
         except Exception:
             logger.exception("Stripe webhook verification failed")
+            return False
+
+    async def refund(self, provider_payment_id: str) -> bool:
+        try:
+            from stripe import Refund
+
+            await _run_in_thread(
+                Refund.create,
+                payment_intent=provider_payment_id,
+            )
+            return True
+        except Exception:
+            logger.exception("Stripe refund failed for %s", provider_payment_id)
             return False
 
 
@@ -216,3 +236,38 @@ class PaymentService:
     async def _mark_failed(self, payment: Payment, *, reason: str | None = None) -> None:
         payment.status = PaymentStatus.FAILED
         await self.session.flush()
+
+    async def refund(
+        self,
+        admin: User,
+        payment_id: UUID,
+        *,
+        reason: str | None = None,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> Payment:
+        """Refund a successful payment. Idempotent; requires the refund permission."""
+        from app.api.errors import ValidationAppError
+
+        payment = await self.session.get(Payment, payment_id)
+        if payment is None:
+            from app.api.errors import NotFoundError
+
+            raise NotFoundError("Payment not found", code="PAYMENT_NOT_FOUND")
+        if payment.status != PaymentStatus.SUCCESS:
+            raise ValidationAppError("Only successful payments can be refunded", code="PAYMENT_NOT_REFUNDABLE")
+        provider_refunded = await self.provider.refund(payment.provider_payment_id or "")
+        if not provider_refunded:
+            raise ValidationAppError("Payment provider declined the refund", code="REFUND_FAILED")
+        payment.status = PaymentStatus.REFUNDED
+        await self.audit.record(
+            action="payment.refund",
+            actor_user_id=admin.id,
+            entity_type="payment",
+            entity_id=str(payment.id),
+            metadata={"reason": reason, "amount": str(payment.amount), "currency": payment.currency},
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+        await self.session.flush()
+        return payment

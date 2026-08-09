@@ -71,6 +71,10 @@ class Settings(BaseSettings):
     NRI_JOB_VERIFICATION_PRICE: int = 199
     JOB_VERIFICATION_CURRENCY: str = "INR"
 
+    # Remote app configuration cache
+    APP_CONFIG_CACHE_TTL: int = 900
+    APP_CONFIG_CACHE_KEY: str = "app_config:public"
+
     @field_validator("DATABASE_URL", mode="before")
     @classmethod
     def _default_scheme(cls, v: str) -> str:

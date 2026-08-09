@@ -1,9 +1,11 @@
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import Boolean, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import GUID, Base, JSONBType, gen_uuid
+from app.db.base import GUID, Base, JSONBType, TimestampMixin, enum_column, gen_uuid
+from app.db.enums import ConfigCategory, ConfigValueType
 
 
 class Language(Base):
@@ -103,12 +105,24 @@ class Occupation(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
-class AppConfig(Base):
-    """Key/value configuration that is database-driven (e.g. verification pricing)."""
+class AppConfig(Base, TimestampMixin):
+    """Database-driven key/value configuration for the mobile application and server.
+
+    Public entries are served to clients via ``GET /api/v1/app/config`` (grouped by
+    category). Private entries are only visible through admin endpoints. This table
+    is NOT a secret store — secrets live in environment variables.
+    """
 
     __tablename__ = "app_config"
 
     id: Mapped[UUID] = mapped_column(GUID, primary_key=True, default=gen_uuid)
-    key: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
-    value: Mapped[dict] = mapped_column(JSONBType, nullable=False, default=dict)
+    key: Mapped[str] = mapped_column(String(120), nullable=False, unique=True, index=True)
+    value: Mapped[Any] = mapped_column(JSONBType, nullable=False)
+    value_type: Mapped[ConfigValueType] = enum_column(ConfigValueType, default=ConfigValueType.STRING, nullable=False)
+    category: Mapped[ConfigCategory] = enum_column(
+        ConfigCategory, default=ConfigCategory.APP, nullable=False, index=True
+    )
+    is_public: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)

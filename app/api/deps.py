@@ -6,7 +6,7 @@ from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.errors import UnauthorizedError
+from app.api.errors import ForbiddenError, UnauthorizedError
 from app.db.models import User
 from app.db.session import SessionLocal
 from app.repositories.user_repo import UserRepository
@@ -49,7 +49,41 @@ async def get_current_user(
 def require_role(*roles: str) -> Callable:
     def dependency(user: User = Depends(get_current_user)) -> User:
         if user.role.value not in roles:
-            raise UnauthorizedError("Insufficient permissions", code="FORBIDDEN")
+            raise ForbiddenError("Insufficient permissions", code="FORBIDDEN")
+        return user
+
+    return dependency
+
+
+def require_permission(*permissions: str) -> Callable:
+    """Grants access only when the caller's role holds ALL the given permissions."""
+
+    async def dependency(
+        user: User = Depends(get_current_user),
+        session: AsyncSession = Depends(get_session),
+    ) -> User:
+        from app.services.permission_service import PermissionService
+
+        allowed = await PermissionService(session).permissions_for_role(user.role)
+        if not all(p in allowed for p in permissions):
+            raise ForbiddenError("Insufficient permissions", code="FORBIDDEN")
+        return user
+
+    return dependency
+
+
+def require_any_permission(*permissions: str) -> Callable:
+    """Grants access when the caller's role holds ANY of the given permissions."""
+
+    async def dependency(
+        user: User = Depends(get_current_user),
+        session: AsyncSession = Depends(get_session),
+    ) -> User:
+        from app.services.permission_service import PermissionService
+
+        allowed = await PermissionService(session).permissions_for_role(user.role)
+        if not any(p in allowed for p in permissions):
+            raise ForbiddenError("Insufficient permissions", code="FORBIDDEN")
         return user
 
     return dependency

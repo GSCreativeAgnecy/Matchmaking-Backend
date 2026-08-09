@@ -34,6 +34,7 @@ class JobVerification(Base, TimestampMixin):
 
     reviewer_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     rejection_reason: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    reviewer_notes: Mapped[str | None] = mapped_column(String(1000), nullable=True)
 
     __table_args__ = (
         CheckConstraint(

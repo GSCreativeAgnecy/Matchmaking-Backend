@@ -4,17 +4,19 @@ Usage:
     python -m app.seed
 
 Seeds lookup data (languages, religions, castes, countries, states, education,
-occupations, interests), subscription plans, and config-driven pricing. Safe to
-run repeatedly — it never duplicates rows.
+occupations, interests), subscription plans, and the remote app configuration
+key registry. Safe to run repeatedly — it never duplicates rows and never
+overwrites admin-edited configuration.
 """
 
 import asyncio
+import os
 from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config.settings import settings
+from app.db.enums import AccountStatus, UserRole
 from app.db.models import (
     AppConfig,
     Caste,
@@ -24,10 +26,15 @@ from app.db.models import (
     Language,
     Occupation,
     Religion,
+    RolePermission,
     State,
     SubscriptionPlan,
+    User,
 )
 from app.db.session import SessionLocal
+from app.security.password import hash_password
+from app.security.permissions import ROLE_PERMISSIONS
+from app.services.app_config_keys import CONFIG_KEY_SPECS
 
 LANGUAGES = [
     ("en", "English"),
@@ -164,17 +171,6 @@ PLANS = [
     },
 ]
 
-CONFIG_ITEMS = {
-    "LOCAL_JOB_VERIFICATION_PRICE": {
-        "amount": int(settings.LOCAL_JOB_VERIFICATION_PRICE),
-        "currency": settings.JOB_VERIFICATION_CURRENCY,
-    },
-    "NRI_JOB_VERIFICATION_PRICE": {
-        "amount": int(settings.NRI_JOB_VERIFICATION_PRICE),
-        "currency": settings.JOB_VERIFICATION_CURRENCY,
-    },
-}
-
 
 async def _get_or_create(session: AsyncSession, model, *, lookup: dict, create: dict) -> tuple[object, bool]:
     obj = await session.scalar(select(model).where(*[getattr(model, k) == v for k, v in lookup.items()]))
@@ -219,12 +215,71 @@ async def seed(session: AsyncSession) -> int:
         _, is_new = await _get_or_create(session, SubscriptionPlan, lookup={"name": plan["name"]}, create=plan)
         created += 1 if is_new else 0
 
-    for key, value in CONFIG_ITEMS.items():
-        _, is_new = await _get_or_create(session, AppConfig, lookup={"key": key}, create={"value": value})
+    # Remote app configuration (idempotent; existing rows are left untouched so
+    # admin edits are never overwritten by a re-run).
+    for spec in CONFIG_KEY_SPECS.values():
+        _, is_new = await _get_or_create(
+            session,
+            AppConfig,
+            lookup={"key": spec.key},
+            create={
+                "value": spec.default,
+                "value_type": spec.value_type,
+                "category": spec.category,
+                "is_public": spec.is_public,
+                "is_active": True,
+                "description": spec.description,
+            },
+        )
         created += 1 if is_new else 0
+
+    # Role -> permission registry (idempotent; runtime overrides survive re-runs).
+    created += await _seed_role_permissions(session)
+
+    # Development-only admin. Only created when explicitly configured; the
+    # password comes from the environment and is never logged or committed.
+    created += await _seed_dev_admin(session)
 
     await session.commit()
     return created
+
+
+async def _seed_role_permissions(session: AsyncSession) -> int:
+    created = 0
+    for role, permissions in ROLE_PERMISSIONS.items():
+        for permission in permissions:
+            _, is_new = await _get_or_create(
+                session,
+                RolePermission,
+                lookup={"role": role.value, "permission": permission},
+                create={},
+            )
+            created += 1 if is_new else 0
+    return created
+
+
+async def _seed_dev_admin(session: AsyncSession) -> int:
+    email = os.getenv("DEV_ADMIN_EMAIL")
+    password = os.getenv("DEV_ADMIN_PASSWORD")
+    if not email or not password:
+        return 0
+    if len(password) < 8 or not any(c.isupper() for c in password) or not any(c.isdigit() for c in password):
+        raise ValueError("DEV_ADMIN_PASSWORD must be at least 8 chars with an uppercase letter and a digit")
+    existing = await session.scalar(select(User).where(User.email == email))
+    if existing is not None:
+        return 0
+    session.add(
+        User(
+            email=email.lower(),
+            password_hash=hash_password(password),
+            account_status=AccountStatus.ACTIVE,
+            role=UserRole.SUPER_ADMIN,
+            email_verified_at=None,
+        )
+    )
+    await session.flush()
+    print(f"Created development admin for {email} (SUPER_ADMIN).")  # noqa: T201
+    return 1
 
 
 async def main() -> None:

@@ -32,6 +32,35 @@ class TokenResponse(BaseModel):
     expires_in: int
 
 
+class MfaRequiredResponse(BaseModel):
+    requires_2fa: bool = True
+    mfa_token: str
+    expires_in: int
+
+
+class TotpVerifyRequest(BaseModel):
+    mfa_token: str
+    code: str
+
+
+class TotpEnableRequest(BaseModel):
+    code: str
+
+
+class TotpDisableRequest(BaseModel):
+    password: str
+
+
+class TotpSetupResponse(BaseModel):
+    secret: str
+    otpauth_url: str
+    recovery_codes: list[str]
+
+
+class TotpStatusResponse(BaseModel):
+    enabled: bool
+
+
 class RefreshRequest(BaseModel):
     refresh_token: str
 
