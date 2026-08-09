@@ -239,6 +239,25 @@ npm run start -p 3001
 - Configure the backend `CORS_ORIGINS` to include the admin origin (never `*`).
 - The refresh cookie requires HTTPS in production (`secure: true`).
 
+### Docker Compose (API + dashboard together)
+
+The root `docker-compose.yml` runs both the FastAPI stack and the admin dashboard
+behind a single nginx reverse proxy:
+
+```bash
+docker compose up --build
+```
+
+- Only the `proxy` service publishes a host port (`http://localhost:80`).
+- Everything else uses `expose` (internal to the Compose network):
+  - `/` and `/_next/*` → `admin` (Next.js standalone, port 3001)
+  - `/api/auth/*` → admin BFF (HttpOnly refresh cookie handling)
+  - `/api/v1/*` → `api` (FastAPI, port 8000)
+  - `postgres` (5432) and `redis` (6379) are never published to the host.
+- The admin image (`admin/Dockerfile`) builds with `NEXT_PUBLIC_API_URL=""` so the
+  browser calls the same origin; the server-side BFF targets the API via the
+  non-public `ADMIN_API_URL` (`http://api:8000`) environment variable.
+
 ---
 
 ## 10. Testing

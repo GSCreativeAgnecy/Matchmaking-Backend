@@ -1,14 +1,33 @@
 name: matchmaking
 
+# Everything except the reverse proxy uses `expose` (internal-only within the
+# Compose network). The nginx `proxy` service is the single host-published entry
+# point (http://localhost):
+#   /               -> admin dashboard (Next.js)
+#   /api/v1/*       -> FastAPI
+#   /api/auth/*     -> admin BFF (HttpOnly refresh cookie)
+# Data stores (postgres, redis) are never published to the host.
+
 services:
+  proxy:
+    image: nginx:1.27-alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - admin
+      - api
+    restart: unless-stopped
+
   api:
     build: .
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     volumes:
       - ./app:/app/app
       - ./storage:/app/storage
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     environment:
       DATABASE_URL: postgresql+asyncpg://matchmake:matchmake@postgres:5432/matchmaking
       REDIS_URL: redis://redis:6379/0
@@ -16,6 +35,8 @@ services:
       LOCAL_STORAGE_PATH: /app/storage
       ENVIRONMENT: development
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-secret-change-me}
+      # Allow the browser-origin admin dashboard to call the API through the proxy.
+      CORS_ORIGINS: '["http://localhost"]'
     depends_on:
       postgres:
         condition: service_healthy
@@ -42,14 +63,33 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  admin:
+    build:
+      context: ./admin
+      args:
+        # Empty on purpose: the browser calls the same origin (/api/v1) and the
+        # proxy routes it to the API. Never put secrets in a NEXT_PUBLIC_* arg.
+        NEXT_PUBLIC_API_URL: ""
+    environment:
+      # Server-only internal API target for the BFF auth routes (not inlined).
+      ADMIN_API_URL: http://api:8000
+      NEXT_PUBLIC_API_URL: ""
+      NODE_ENV: production
+      PORT: 3001
+    expose:
+      - "3001"
+    depends_on:
+      - api
+    restart: unless-stopped
+
   postgres:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: matchmake
       POSTGRES_PASSWORD: matchmake
       POSTGRES_DB: matchmaking
-    ports:
-      - "5432:5432"
+    expose:
+      - "5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -60,8 +100,8 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    expose:
+      - "6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
