@@ -1,0 +1,86 @@
+name: matchmaking
+
+services:
+  api:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./app:/app/app
+      - ./storage:/app/storage
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://matchmake:matchmake@postgres:5432/matchmaking
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_BACKEND: local
+      LOCAL_STORAGE_PATH: /app/storage
+      ENVIRONMENT: development
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-secret-change-me}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: arq app.workers.arq_app.WorkerSettings
+    volumes:
+      - ./app:/app/app
+    environment:
+      DATABASE_URL: postgresql+asyncpg://matchmake:matchmake@postgres:5432/matchmaking
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_BACKEND: local
+      LOCAL_STORAGE_PATH: /app/storage
+      ENVIRONMENT: development
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-secret-change-me}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: matchmake
+      POSTGRES_PASSWORD: matchmake
+      POSTGRES_DB: matchmaking
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U matchmake -d matchmaking"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    build: .
+    command: >
+      sh -c "alembic upgrade head && python -m app.seed"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://matchmake:matchmake@postgres:5432/matchmaking
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_BACKEND: local
+      LOCAL_STORAGE_PATH: /app/storage
+      ENVIRONMENT: development
+
+volumes:
+  pgdata:
