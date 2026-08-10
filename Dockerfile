@@ -13,6 +13,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY pyproject.toml ./
 COPY app ./app
+# Alembic config + migrations so the `migrate` one-shot service can run
+# `alembic upgrade head && python -m app.seed`.
+COPY alembic.ini ./
+COPY migrations ./migrations
 
 RUN pip install --upgrade pip && pip install .
 
