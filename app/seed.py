@@ -217,7 +217,14 @@ async def seed(session: AsyncSession) -> int:
 
     # Remote app configuration (idempotent; existing rows are left untouched so
     # admin edits are never overwritten by a re-run).
+    #
+    # Specs whose default is None are intentionally NOT seeded: ``app_config.value``
+    # is NOT NULL, and the public/admin config response already falls back to the
+    # schema defaults for missing keys, so the key simply stays unset until an
+    # admin sets it.
     for spec in CONFIG_KEY_SPECS.values():
+        if spec.default is None:
+            continue
         _, is_new = await _get_or_create(
             session,
             AppConfig,
