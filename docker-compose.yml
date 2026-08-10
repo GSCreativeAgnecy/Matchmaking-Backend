@@ -1,7 +1,7 @@
 name: matchmaking
 
 # Everything uses `expose` (internal-only within the Compose network). No host
-# ports are published — a platform edge proxy (e.g. Coolify) routes a domain to
+# ports are published - a platform edge proxy (e.g. Coolify) routes a domain to
 # the nginx `proxy` service, which is the single application origin:
 #   /               -> admin dashboard (Next.js)
 #   /api/v1/*       -> FastAPI
@@ -34,6 +34,8 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://matchmake:matchmake@postgres:5432/matchmaking
       REDIS_URL: redis://redis:6379/0
+      # ARQ worker/enqueue pool - separate DB index, also the redis service.
+      ARQ_REDIS_URL: redis://redis:6379/1
       STORAGE_BACKEND: local
       LOCAL_STORAGE_PATH: /app/storage
       ENVIRONMENT: development
@@ -55,6 +57,8 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://matchmake:matchmake@postgres:5432/matchmaking
       REDIS_URL: redis://redis:6379/0
+      # ARQ worker pool - separate DB index, also the redis service.
+      ARQ_REDIS_URL: redis://redis:6379/1
       STORAGE_BACKEND: local
       LOCAL_STORAGE_PATH: /app/storage
       ENVIRONMENT: development
@@ -121,6 +125,8 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://matchmake:matchmake@postgres:5432/matchmaking
       REDIS_URL: redis://redis:6379/0
+      # ARQ enqueue pool - separate DB index, also the redis service.
+      ARQ_REDIS_URL: redis://redis:6379/1
       STORAGE_BACKEND: local
       LOCAL_STORAGE_PATH: /app/storage
       ENVIRONMENT: development
