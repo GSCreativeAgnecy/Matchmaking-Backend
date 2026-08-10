@@ -1,27 +1,24 @@
 name: matchmaking
 
-# Everything uses `expose` (internal-only within the Compose network). No host
-# ports are published - a platform edge proxy (e.g. Coolify) routes a domain to
-# the nginx `proxy` service, which is the single application origin:
-#   /               -> admin dashboard (Next.js)
-#   /api/v1/*       -> FastAPI
-#   /api/auth/*     -> admin BFF (HttpOnly refresh cookie)
-# Data stores (postgres, redis) are never published to the host.
-
 services:
   proxy:
     build:
       context: .
       dockerfile: docker/nginx.Dockerfile
-    # No host port: the platform's edge proxy (e.g. Coolify) routes a domain
-    # to this container on port 80. Publishing :80 on the host conflicts with
-    # other services / the platform proxy itself.
+
+    # Coolify's edge proxy routes the public domain to this service.
+    # Do NOT publish 80:80.
     expose:
       - "80"
+
     depends_on:
-      - admin
-      - api
+      admin:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
     restart: unless-stopped
+
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:80/healthz"]
       interval: 15s
@@ -31,31 +28,54 @@ services:
 
   api:
     build: .
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-    volumes:
-      - ./app:/app/app
-      - ./storage:/app/storage
+
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port 8000
+
     expose:
       - "8000"
+
     environment:
-      DATABASE_URL: postgresql+asyncpg://matchmake:matchmake@postgres:5432/matchmaking
+      DATABASE_URL: postgresql+asyncpg://matchmake:${POSTGRES_PASSWORD}@postgres:5432/matchmaking
       REDIS_URL: redis://redis:6379/0
-      # ARQ worker/enqueue pool - separate DB index, also the redis service.
       ARQ_REDIS_URL: redis://redis:6379/1
+
       STORAGE_BACKEND: local
       LOCAL_STORAGE_PATH: /app/storage
-      ENVIRONMENT: development
-      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-secret-change-me}
-      # Allow the browser-origin admin dashboard to call the API through the proxy.
-      CORS_ORIGINS: '["http://localhost"]'
+
+      ENVIRONMENT: production
+
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
+
+      # Leave as [] when browser and API use the same origin.
+      # If you need cross-origin requests, set this in Coolify to:
+      # ["https://your-domain.com"]
+      CORS_ORIGINS: ${CORS_ORIGINS:-[]}
+
+    volumes:
+      - appstorage:/app/storage
+
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
     restart: unless-stopped
+
     healthcheck:
-      test: ["CMD", "curl", "-f", "-s", "http://127.0.0.1:8000/health"]
+      test:
+        [
+          "CMD",
+          "curl",
+          "-f",
+          "-s",
+          "http://127.0.0.1:8000/health"
+        ]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -63,26 +83,42 @@ services:
 
   worker:
     build: .
+
     command: arq app.workers.arq_app.WorkerSettings
-    volumes:
-      - ./app:/app/app
+
     environment:
-      DATABASE_URL: postgresql+asyncpg://matchmake:matchmake@postgres:5432/matchmaking
+      DATABASE_URL: postgresql+asyncpg://matchmake:${POSTGRES_PASSWORD}@postgres:5432/matchmaking
       REDIS_URL: redis://redis:6379/0
-      # ARQ worker pool - separate DB index, also the redis service.
       ARQ_REDIS_URL: redis://redis:6379/1
+
       STORAGE_BACKEND: local
       LOCAL_STORAGE_PATH: /app/storage
-      ENVIRONMENT: development
-      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-secret-change-me}
+
+      ENVIRONMENT: production
+
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set}
+
+    volumes:
+      - appstorage:/app/storage
+
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
     restart: unless-stopped
+
     healthcheck:
-      test: ["CMD", "python", "-c", "import redis; redis.Redis.from_url('redis://redis:6379/1', socket_connect_timeout=3).ping()"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import redis; redis.Redis.from_url('redis://redis:6379/1', socket_connect_timeout=3).ping()"
+        ]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -92,22 +128,36 @@ services:
     build:
       context: ./admin
       args:
-        # Empty on purpose: the browser calls the same origin (/api/v1) and the
-        # proxy routes it to the API. Never put secrets in a NEXT_PUBLIC_* arg.
+        # Browser uses same-origin requests through nginx.
+        # Do not put secrets in NEXT_PUBLIC_* variables.
         NEXT_PUBLIC_API_URL: ""
+
     environment:
-      # Server-only internal API target for the BFF auth routes (not inlined).
+      # Server-side BFF → FastAPI over the private Compose network.
       ADMIN_API_URL: http://api:8000
-      NEXT_PUBLIC_API_URL: ""
+
       NODE_ENV: production
       PORT: 3001
+
     expose:
       - "3001"
+
     depends_on:
-      - api
+      api:
+        condition: service_healthy
+
     restart: unless-stopped
+
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3001/healthz"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "-O",
+          "/dev/null",
+          "http://127.0.0.1:3001/healthz"
+        ]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -115,49 +165,77 @@ services:
 
   postgres:
     image: postgres:16-alpine
+
     environment:
       POSTGRES_USER: matchmake
-      POSTGRES_PASSWORD: matchmake
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       POSTGRES_DB: matchmaking
+
     expose:
       - "5432"
+
     volumes:
       - pgdata:/var/lib/postgresql/data
+
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U matchmake -d matchmaking"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U matchmake -d matchmaking"
+        ]
       interval: 5s
       timeout: 5s
       retries: 10
 
+    restart: unless-stopped
+
   redis:
     image: redis:7-alpine
+
     expose:
       - "6379"
+
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10
 
+    restart: unless-stopped
+
   migrate:
     build: .
+
     command: >
       sh -c "alembic upgrade head && python -m app.seed"
-    depends_on:
-      postgres:
-        condition: service_healthy
+
     environment:
-      DATABASE_URL: postgresql+asyncpg://matchmake:matchmake@postgres:5432/matchmaking
+      DATABASE_URL: postgresql+asyncpg://matchmake:${POSTGRES_PASSWORD}@postgres:5432/matchmaking
       REDIS_URL: redis://redis:6379/0
-      # ARQ enqueue pool - separate DB index, also the redis service.
       ARQ_REDIS_URL: redis://redis:6379/1
+
       STORAGE_BACKEND: local
       LOCAL_STORAGE_PATH: /app/storage
-      ENVIRONMENT: development
-      # Optional dev-only SUPER_ADMIN, created by `python -m app.seed`.
-      # Leave unset (empty) in production. Never commit real credentials.
+
+      ENVIRONMENT: production
+
+      # Optional seed admin.
+      # Leave empty in production unless you explicitly want
+      # the seed process to create this account.
       DEV_ADMIN_EMAIL: ${DEV_ADMIN_EMAIL:-}
       DEV_ADMIN_PASSWORD: ${DEV_ADMIN_PASSWORD:-}
 
+    volumes:
+      - appstorage:/app/storage
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    # This is a one-shot job. It should run migrations and exit.
+    exclude_from_hc: true
+
+
 volumes:
   pgdata:
+  appstorage:
