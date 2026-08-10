@@ -252,17 +252,18 @@ async def seed(session: AsyncSession) -> int:
 
 
 async def _seed_role_permissions(session: AsyncSession) -> int:
-    created = 0
+    """Seed the role -> permission registry in bulk (one read, one insert)."""
+    existing = set(
+        (await session.execute(select(RolePermission.role, RolePermission.permission))).all()
+    )
+    to_add: list[RolePermission] = []
     for role, permissions in ROLE_PERMISSIONS.items():
         for permission in permissions:
-            _, is_new = await _get_or_create(
-                session,
-                RolePermission,
-                lookup={"role": role.value, "permission": permission},
-                create={},
-            )
-            created += 1 if is_new else 0
-    return created
+            if (role.value, permission) not in existing:
+                to_add.append(RolePermission(role=role.value, permission=permission))
+    session.add_all(to_add)
+    await session.flush()
+    return len(to_add)
 
 
 async def _seed_dev_admin(session: AsyncSession) -> int:
