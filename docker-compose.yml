@@ -1,8 +1,8 @@
 name: matchmaking
 
-# Everything except the reverse proxy uses `expose` (internal-only within the
-# Compose network). The nginx `proxy` service is the single host-published entry
-# point (http://localhost):
+# Everything uses `expose` (internal-only within the Compose network). No host
+# ports are published — a platform edge proxy (e.g. Coolify) routes a domain to
+# the nginx `proxy` service, which is the single application origin:
 #   /               -> admin dashboard (Next.js)
 #   /api/v1/*       -> FastAPI
 #   /api/auth/*     -> admin BFF (HttpOnly refresh cookie)
@@ -13,8 +13,11 @@ services:
     build:
       context: .
       dockerfile: docker/nginx.Dockerfile
-    ports:
-      - "80:80"
+    # No host port: the platform's edge proxy (e.g. Coolify) routes a domain
+    # to this container on port 80. Publishing :80 on the host conflicts with
+    # other services / the platform proxy itself.
+    expose:
+      - "80"
     depends_on:
       - admin
       - api
