@@ -70,14 +70,30 @@ _campaign_status_enum = sa.Enum(
 )
 
 
+def _recreate_user_role_check(*, allow_new_roles: bool) -> None:
+    """Recreate the ``users.role`` CHECK constraint.
+
+    The initial migration created it as a plain ``userrole`` CHECK (the enum
+    name) on Postgres. Alembic batch mode would rename it to ``ck_users_userrole``
+    (naming convention) and fail with ``constraint does not exist``, so use raw
+    SQL on Postgres. SQLite never renders an enum CHECK constraint, so there is
+    nothing to migrate there.
+    """
+    allowed = (
+        "('USER','MODERATOR','VERIFIER','SUPPORT','FINANCE','ANALYST','ADMIN','SUPER_ADMIN')"
+        if allow_new_roles
+        else "('USER','MODERATOR','VERIFIER','ADMIN','SUPER_ADMIN')"
+    )
+    if op.get_bind().dialect.name == "postgresql":
+        # Drop by either possible name, then recreate explicitly.
+        op.execute("ALTER TABLE users DROP CONSTRAINT IF EXISTS userrole")
+        op.execute("ALTER TABLE users DROP CONSTRAINT IF EXISTS ck_users_userrole")
+        op.execute(f"ALTER TABLE users ADD CONSTRAINT userrole CHECK (role IN {allowed})")
+
+
 def upgrade() -> None:
     # --- users.role: allow the new admin roles -------------------------------
-    with op.batch_alter_table("users") as batch_op:
-        batch_op.drop_constraint("userrole", type_="check")
-        batch_op.create_check_constraint(
-            "userrole",
-            "role IN ('USER', 'MODERATOR', 'VERIFIER', 'SUPPORT', 'FINANCE', 'ANALYST', 'ADMIN', 'SUPER_ADMIN')",
-        )
+    _recreate_user_role_check(allow_new_roles=True)
 
     # --- role_permissions ----------------------------------------------------
     op.create_table(
@@ -216,9 +232,5 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_role_permissions_permission"), table_name="role_permissions")
     op.drop_table("role_permissions")
 
-    with op.batch_alter_table("users") as batch_op:
-        batch_op.drop_constraint("userrole", type_="check")
-        batch_op.create_check_constraint(
-            "userrole",
-            "role IN ('USER', 'MODERATOR', 'VERIFIER', 'ADMIN', 'SUPER_ADMIN')",
-        )
+    _recreate_user_role_check(allow_new_roles=False)
+
