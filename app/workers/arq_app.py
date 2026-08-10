@@ -6,7 +6,9 @@ code without bridges or serialization layers.
 """
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 
 from arq.connections import RedisSettings
 
@@ -14,13 +16,16 @@ from app.config.settings import settings
 
 logger = logging.getLogger("app.worker")
 
+# arq (>=0.26) accepts a single startup/shutdown coroutine, not a list.
+LifecycleHook = Callable[[dict[str, Any]], Awaitable[None]]
+
 
 @dataclass
 class Settings:
     functions: list
     redis_settings: RedisSettings
-    on_startup: list
-    on_shutdown: list
+    on_startup: LifecycleHook | None = None
+    on_shutdown: LifecycleHook | None = None
     max_jobs: int = 10
     job_timeout: int = 300
     keep_result: int = 3600
@@ -61,8 +66,8 @@ def get_worker_settings() -> Settings:
             tasks.process_notification_campaign,
         ],
         redis_settings=build_redis_settings(),
-        on_startup=[startup],
-        on_shutdown=[shutdown],
+        on_startup=startup,
+        on_shutdown=shutdown,
     )
 
 
