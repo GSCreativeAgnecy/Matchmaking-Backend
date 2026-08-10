@@ -22,6 +22,12 @@ services:
       - admin
       - api
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:80/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
   api:
     build: .
@@ -48,6 +54,12 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "-s", "http://127.0.0.1:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   worker:
     build: .
@@ -69,6 +81,12 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import redis; redis.Redis.from_url('redis://redis:6379/1', socket_connect_timeout=3).ping()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   admin:
     build:
@@ -88,6 +106,12 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3001/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   postgres:
     image: postgres:16-alpine
@@ -130,6 +154,10 @@ services:
       STORAGE_BACKEND: local
       LOCAL_STORAGE_PATH: /app/storage
       ENVIRONMENT: development
+      # Optional dev-only SUPER_ADMIN, created by `python -m app.seed`.
+      # Leave unset (empty) in production. Never commit real credentials.
+      DEV_ADMIN_EMAIL: ${DEV_ADMIN_EMAIL:-}
+      DEV_ADMIN_PASSWORD: ${DEV_ADMIN_PASSWORD:-}
 
 volumes:
   pgdata:
